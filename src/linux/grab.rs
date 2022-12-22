@@ -269,8 +269,8 @@ fn read_x_event(x_event: &mut xlib::XEvent, display: *mut xlib::Display) {
     while (unsafe { xlib::XPending(display) }) > 0 {
         unsafe {
             xlib::XNextEvent(display, x_event);
-            if x_event.type_ == xlib::FocusIn || x_event.type_ == xlib::FocusOut {
-                return;
+            if x_event.type_ != xlib::KeyPress && x_event.type_ != xlib::KeyPress {
+                continue;
             }
         }
         let keycode = unsafe { x_event.key.keycode };
