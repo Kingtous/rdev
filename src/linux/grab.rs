@@ -1,6 +1,6 @@
 // This code is awful. Good luck
 use crate::{key_from_code, Event, EventType, GrabError};
-use log::error;
+use log::{debug, error};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use std::os::unix::net::UnixDatagram;
@@ -15,7 +15,7 @@ use std::{
     sync::{mpsc::Sender, Arc, Mutex},
     time::SystemTime,
 };
-use x11::xlib::{self, Display, GrabModeAsync, KeyPressMask, KeyReleaseMask};
+use x11::xlib::{self, Display, GrabModeAsync, KeyPressMask, KeyReleaseMask, FocusChangeMask, XEvent};
 
 #[derive(Debug)]
 pub struct MyDisplay(*mut xlib::Display);
@@ -25,8 +25,6 @@ unsafe impl Send for MyDisplay {}
 lazy_static::lazy_static! {
     pub static ref SENDER: Arc<Mutex<Option<Sender<GrabEvent>>>> = Arc::new(Mutex::new(None));
 }
-
-const KEYPRESS_EVENT: i32 = 2;
 
 pub static mut GLOBAL_CALLBACK: Option<Box<dyn FnMut(Event) -> Option<Event>>> = None;
 static SOCK_FILE_PATH: &str = "/tmp/rdev_service.sock";
@@ -56,26 +54,76 @@ fn convert_event(code: u32, is_press: bool) -> Event {
     }
 }
 
+#[no_mangle]
+unsafe extern "C" fn event_is_focus_with_serial(
+    _display: *mut Display,
+    event: *mut XEvent,
+    arg: xlib::XPointer,
+) -> c_int {
+    let serial = *(arg as *mut _ as *mut u64);
+    if (*event).any.serial != serial {
+        return 0;
+    }
+
+    if ((*event).type_ != xlib::FocusIn) && ((*event).type_ != xlib::FocusOut) {
+        return 0;
+    }
+
+    return 1;
+}
+
+// https://github.com/TigerVNC/tigervnc/pull/661/files
 fn grab_keys(display: *mut Display, grab_window: libc::c_ulong) {
     unsafe {
-        xlib::XGrabKeyboard(
+        let mut xev: XEvent = std::mem::zeroed();
+        let serial = xlib::XNextRequest(display);
+        match xlib::XGrabKeyboard(
             display,
             grab_window,
             c_int::from(true),
             GrabModeAsync,
             GrabModeAsync,
             xlib::CurrentTime,
-        );
-        xlib::XFlush(display);
-        thread::sleep(Duration::from_millis(50));
+        ) {
+            xlib::AlreadyGrabbed => {
+                // TODO: There'a a race.
+                error!("Failed xlib::XGrabKeyboard AlreadyGrabbed");
+            }
+            xlib::GrabSuccess => {
+                xlib::XSync(display, c_int::from(false));
+                while xlib::XCheckIfEvent(
+                    display,
+                    &mut xev as _,
+                    Some(event_is_focus_with_serial),
+                    &serial as *const _ as xlib::XPointer,
+                ) == 1
+                {
+                    debug!("Ignored synthetic focus event cause by grab change");
+                }
+            }
+            ret => {
+                error!("Failed xlib::XGrabKeyboard {}", ret);
+            }
+        }
     }
 }
 
+// https://github.com/TigerVNC/tigervnc/pull/661/files
 fn ungrab_keys(display: *mut Display) {
     unsafe {
+        let mut xev: XEvent = std::mem::zeroed();
+        let serial = xlib::XNextRequest(display);
         xlib::XUngrabKeyboard(display, xlib::CurrentTime);
-        xlib::XFlush(display);
-        thread::sleep(Duration::from_millis(50));
+        xlib::XSync(display, c_int::from(false));
+        while xlib::XCheckIfEvent(
+            display,
+            &mut xev as _,
+            Some(event_is_focus_with_serial),
+            &serial as *const _ as xlib::XPointer,
+        ) == 1
+        {
+            debug!("Ignored synthetic focus event cause by grab change");
+        }
     }
 }
 
@@ -158,7 +206,7 @@ fn get_root_window(screen: &*mut xlib::Screen) -> xlib::Window {
 
 fn listen_to_keyboard_events(display: &*mut xlib::Display, window: &xlib::Window) {
     unsafe {
-        xlib::XSelectInput(*display, *window, KeyPressMask | KeyReleaseMask);
+        xlib::XSelectInput(*display, *window, KeyPressMask | KeyReleaseMask | FocusChangeMask);
     }
 }
 
@@ -221,9 +269,12 @@ fn read_x_event(x_event: &mut xlib::XEvent, display: *mut xlib::Display) {
     while (unsafe { xlib::XPending(display) }) > 0 {
         unsafe {
             xlib::XNextEvent(display, x_event);
+            if x_event.type_ == xlib::FocusIn || x_event.type_ == xlib::FocusOut {
+                return;
+            }
         }
         let keycode = unsafe { x_event.key.keycode };
-        let is_press = unsafe { x_event.type_ == KEYPRESS_EVENT };
+        let is_press = unsafe { x_event.type_ == xlib::KeyPress };
         let event = convert_event(keycode, is_press);
         if let Some(tx) = &*SENDER.lock().unwrap() {
             tx.send(GrabEvent::KeyEvent(event)).ok();

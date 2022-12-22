@@ -1,5 +1,4 @@
 use crate::rdev::Key;
-use std::convert::TryInto;
 
 macro_rules! decl_keycodes {
     ($($key:ident, $code:literal, $scancode:literal),*) => {
