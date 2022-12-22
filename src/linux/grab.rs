@@ -54,7 +54,6 @@ fn convert_event(code: u32, is_press: bool) -> Event {
     }
 }
 
-#[no_mangle]
 unsafe extern "C" fn event_is_focus_with_serial(
     _display: *mut Display,
     event: *mut XEvent,
@@ -69,6 +68,7 @@ unsafe extern "C" fn event_is_focus_with_serial(
         return 0;
     }
 
+    debug!("x11 event type: {}, to filter out", (*event).type_);
     return 1;
 }
 
