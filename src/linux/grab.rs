@@ -15,7 +15,9 @@ use std::{
     sync::{mpsc::Sender, Arc, Mutex},
     time::SystemTime,
 };
-use x11::xlib::{self, Display, GrabModeAsync, KeyPressMask, KeyReleaseMask, FocusChangeMask, XEvent};
+use x11::xlib::{
+    self, Display, FocusChangeMask, GrabModeAsync, KeyPressMask, KeyReleaseMask, XEvent,
+};
 
 #[derive(Debug)]
 pub struct MyDisplay(*mut xlib::Display);
@@ -24,6 +26,7 @@ unsafe impl Send for MyDisplay {}
 
 lazy_static::lazy_static! {
     pub static ref SENDER: Arc<Mutex<Option<Sender<GrabEvent>>>> = Arc::new(Mutex::new(None));
+    pub static ref GRAB_WINDOW: Arc<Mutex<Option<xlib::Window>>> = Arc::new(Mutex::new(None));
 }
 
 pub static mut GLOBAL_CALLBACK: Option<Box<dyn FnMut(Event) -> Option<Event>>> = None;
@@ -206,7 +209,11 @@ fn get_root_window(screen: &*mut xlib::Screen) -> xlib::Window {
 
 fn listen_to_keyboard_events(display: &*mut xlib::Display, window: &xlib::Window) {
     unsafe {
-        xlib::XSelectInput(*display, *window, KeyPressMask | KeyReleaseMask | FocusChangeMask);
+        xlib::XSelectInput(
+            *display,
+            *window,
+            KeyPressMask | KeyReleaseMask | FocusChangeMask,
+        );
     }
 }
 
@@ -214,7 +221,12 @@ fn grab_keyboard_events() -> Result<(*mut Display, Window), GrabError> {
     let display = open_display()?;
     let screen_number = get_default_screen_number(&display);
     let screen = get_screen(&display, screen_number)?;
-    let grab_window = get_root_window(&screen);
+    let grab_window;
+    if let Some(xid) = *GRAB_WINDOW.lock().unwrap() {
+        grab_window = xid as _;
+    } else {
+        grab_window = get_root_window(&screen);
+    }
     listen_to_keyboard_events(&display, &grab_window);
 
     Ok((display, grab_window))
@@ -284,6 +296,7 @@ fn read_x_event(x_event: &mut xlib::XEvent, display: *mut xlib::Display) {
 
 fn create_event_loop() -> Result<(), GrabError> {
     let (display, grab_window) = grab_keyboard_events()?;
+    println!("REMOVE ME======= grab window on {}", grab_window);
     let grab_fd = get_grab_fd(display);
     let socket = get_socket()?;
     let socket_fd = socket.as_raw_fd();
@@ -325,6 +338,10 @@ fn start_grab_thread() -> Result<(), GrabError> {
     } else {
         Ok(())
     }
+}
+
+pub fn set_grab_window(xid: Option<xlib::Window>) {
+    *GRAB_WINDOW.lock().unwrap() = xid;
 }
 
 pub fn enable_grab() {
